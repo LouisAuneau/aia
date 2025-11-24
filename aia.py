@@ -8,7 +8,6 @@ import subprocess
 from tempfile import NamedTemporaryFile
 from urllib.request import urlopen, Request
 from urllib.parse import urlsplit
-import warnings
 
 
 __version__ = "0.2.0"
@@ -150,10 +149,8 @@ class AIASession:
 
     def __init__(self, user_agent=DEFAULT_USER_AGENT):
         self.user_agent = user_agent
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            self._context = ssl.SSLContext()  # TLS (don't check broken chain)
-            self._context.load_default_certs()
+        self._context = ssl.SSLContext()  # TLS (don't check broken chain)
+        self._context.load_default_certs()
 
         # Trusted certificates whitelist in dict format like:
         # {"RFC4514 string": b"DER certificate contents"}

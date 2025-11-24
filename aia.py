@@ -8,6 +8,7 @@ import subprocess
 from tempfile import NamedTemporaryFile
 from urllib.request import urlopen, Request
 from urllib.parse import urlsplit
+import warnings
 
 
 __version__ = "0.2.0"
@@ -67,10 +68,63 @@ class CachedMethod:
         return result
 
 
+def pkcs7_to_der(pkcs7_data):
+    """
+    Convert PKCS#7 certificate data to DER format using OpenSSL.
+    Extracts the first certificate from the PKCS#7 bundle.
+
+    Args:
+        pkcs7_data: PKCS#7 certificate data as bytes
+
+    Returns:
+        DER certificate as bytes
+
+    Raises:
+        AIADownloadError: If conversion fails
+    """
+    # Step 1: Extract certificates from PKCS#7 (outputs PEM format)
+    command_line = ["openssl", "pkcs7", "-inform", "DER", "-print_certs"]
+    proc = subprocess.run(command_line, input=pkcs7_data, capture_output=True)
+    if proc.returncode != 0:
+        raise AIADownloadError("Failed to extract certificates from PKCS#7")
+    pem_output = proc.stdout
+    
+    # Step 2: Convert the first PEM certificate to DER format
+    command_line = ["openssl", "x509", "-inform", "PEM", "-outform", "DER"]
+    proc = subprocess.run(command_line, input=pem_output, capture_output=True)
+    if proc.returncode != 0:
+        raise AIADownloadError("Failed to convert PEM certificate to DER")
+    return proc.stdout
+
+def is_pkcs7(cert_data):
+    """
+    Check if the certificate data is in PKCS#7 format.
+    PKCS#7 DER files typically start with 0x30 0x80 or 0x30 0x82/0x83/0x84.
+
+    Args:
+        cert_data: Certificate data as bytes
+
+    Returns:
+        True if the data appears to be PKCS#7, False otherwise
+    """
+    if len(cert_data) < 2:
+        return False
+    
+    # Try to identify PKCS#7 by attempting OpenSSL verification
+    command_line = ["openssl", "pkcs7", "-inform", "DER", "-print_certs", "-noout"]
+    proc = subprocess.run(command_line, input=cert_data, capture_output=True)
+    return proc.returncode == 0
+
 def openssl_get_cert_info(cert_der):
     """
     Get issuer, subject and AIA CA issuers (``aia_ca_issuers``)
     from a DER certificate, using OpenSSL.
+
+    Args:
+        cert_der: DER certificate data as bytes
+
+    Returns:
+        Dictionary with issuer, subject, and aia_ca_issuers keys
     """
     command_line = [
         "openssl", "x509", "-inform", "DER", "-noout",
@@ -96,8 +150,10 @@ class AIASession:
 
     def __init__(self, user_agent=DEFAULT_USER_AGENT):
         self.user_agent = user_agent
-        self._context = ssl.SSLContext()  # TLS (don't check broken chain)
-        self._context.load_default_certs()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            self._context = ssl.SSLContext()  # TLS (don't check broken chain)
+            self._context.load_default_certs()
 
         # Trusted certificates whitelist in dict format like:
         # {"RFC4514 string": b"DER certificate contents"}
@@ -124,6 +180,18 @@ class AIASession:
         from a given URL which should had been found
         as the CA Issuer URI in the AIA extension
         of the previous "node" (certificate) of the chain.
+
+        Automatically detects and converts PKCS#7 (.p7c) files to DER format.
+
+        Args:
+            url: URL to download the certificate from
+
+        Returns:
+            DER certificate as bytes
+
+        Raises:
+            AIASchemeError: If the URL scheme is not HTTP
+            AIADownloadError: If download fails or conversion fails
         """
         if urlsplit(url).scheme != "http":
             raise AIASchemeError("Invalid CA issuer certificate URI protocol")
@@ -132,7 +200,14 @@ class AIASession:
         with urlopen(req) as resp:
             if resp.status != 200:
                 raise AIADownloadError(f"HTTP {resp.status} (CA Issuer Cert.)")
-            return resp.read()
+            cert_data = resp.read()
+        
+        # Check if the downloaded data is PKCS#7 and convert to DER if needed
+        if is_pkcs7(cert_data):
+            logger.debug(f"Converting PKCS#7 certificate from {url} to DER format")
+            return pkcs7_to_der(cert_data)
+        
+        return cert_data
 
     def aia_chase(self, host):
         """
